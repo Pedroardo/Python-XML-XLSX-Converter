@@ -5,7 +5,7 @@ Untuk local dev: python index.py
 """
 
 from flask import Flask, request, send_file, jsonify, Response
-import io, csv
+import io, csv, math
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from openpyxl import load_workbook
@@ -47,16 +47,25 @@ def _num(el, tag):
         return None
 
 
+def _round_no_decimal(v):
+    """Round to integer: fraction > .5 rounds up, fraction <= .5 rounds down.
+    e.g. 5.5 -> 5, 5.6 -> 6, 493487.5 -> 493487, 14008394.4 -> 14008394"""
+    if v is None:
+        return None
+    frac = v - math.floor(v)
+    return math.floor(v) if frac <= 0.5 else math.ceil(v)
+
+
 def to_int_or_float(v):
     if v is None:
         return None
-    return int(v) if v == int(v) else v
+    return _round_no_decimal(v)
 
 
 def fmt_str(v):
     if v is None:
         return None
-    return str(int(v)) if v == int(v) else str(v)
+    return str(_round_no_decimal(v))
 
 
 def format_date(raw):
@@ -157,7 +166,7 @@ def parse_xml_bytes(xml_bytes):
             if not vals:
                 return None
             s = sum(float(v) for v in vals)
-            return str(int(s)) if s == int(s) else str(s)
+            return str(_round_no_decimal(s))
 
         invoice["jumlah_dpp"]   = total_str("dpp")
         invoice["jumlah_ppn"]   = total_str("ppn")
