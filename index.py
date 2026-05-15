@@ -16,10 +16,6 @@ app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 
 # ── Conversion logic ──────────────────────────────────────────────────────────
 
-JENIS_FAKTUR_MAP = {
-    "Normal": "Normal", "normal": "Normal",
-    "Pengganti": "Pengganti", "pengganti": "Pengganti",
-}
 COUNTRY_FIX = {"IND": "IDN"}
 
 def fix_country(code): return COUNTRY_FIX.get(code, code)
@@ -30,153 +26,196 @@ def format_date(raw):
     except ValueError:
         return raw
 
+def get_month(raw):
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d").month
+    except ValueError:
+        return None
+
+def get_year(raw):
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d").strftime("%Y")
+    except ValueError:
+        return None
+
 def _text(el, tag, default=""):
     child = el.find(tag)
     if child is None or child.text is None:
         return default
     return child.text.strip()
 
-def _num(el, tag, default="0"):
-    val = _text(el, tag, default)
+def _float(el, tag):
+    """Return float value or None if tag is absent/empty."""
+    child = el.find(tag)
+    if child is None or not (child.text or "").strip():
+        return None
     try:
-        f = float(val)
-        return str(int(f)) if f == int(f) else str(f)
+        return float(child.text.strip())
     except ValueError:
-        return val
+        return None
+
+def s(v):
+    """Convert empty string to None so the cell is left blank."""
+    if isinstance(v, str) and not v:
+        return None
+    return v
+
 
 def parse_xml_bytes(xml_bytes):
     root = ET.fromstring(xml_bytes)
     seller_tin = _text(root, "TIN")
     invoices = []
+
     for inv in root.iter("TaxInvoice"):
+        raw_date   = _text(inv, "TaxInvoiceDate")
+        opt        = _text(inv, "TaxInvoiceOpt", "Normal")
+        buyer_doc  = _text(inv, "BuyerDocument", "").lower()
+        buyer_docno = _text(inv, "BuyerDocumentNumber")
+
+        fg_pengganti = 1 if opt.lower() == "pengganti" else 0
+
         invoice = {
-            "seller_tin":       seller_tin,
-            "date":             format_date(_text(inv, "TaxInvoiceDate")),
-            "jenis_faktur":     JENIS_FAKTUR_MAP.get(_text(inv, "TaxInvoiceOpt"), _text(inv, "TaxInvoiceOpt")),
-            "kode_transaksi":   _text(inv, "TrxCode"),
-            "ket_tambahan":     _text(inv, "AddInfo"),
-            "dok_pendukung":    _text(inv, "CustomDoc"),
-            "referensi":        _text(inv, "RefDesc"),
-            "cap_fasilitas":    _text(inv, "FacilityStamp"),
-            "id_tku_penjual":   _text(inv, "SellerIDTKU"),
-            "npwp_pembeli":     _text(inv, "BuyerTin"),
-            "jenis_id_pembeli": _text(inv, "BuyerDocument"),
-            "negara_pembeli":   fix_country(_text(inv, "BuyerCountry")),
-            "no_dok_pembeli":   _text(inv, "BuyerDocumentNumber") or "-",
-            "nama_pembeli":     _text(inv, "BuyerName"),
-            "alamat_pembeli":   _text(inv, "BuyerAdress"),
-            "email_pembeli":    _text(inv, "BuyerEmail"),
-            "id_tku_pembeli":   _text(inv, "BuyerIDTKU"),
+            "seller_tin":           seller_tin,
+            "kd_jenis_transaksi":   s(_text(inv, "TrxCode")),
+            "fg_pengganti":         fg_pengganti,
+            # Try common Coretax XML tag names for invoice number
+            "nomor_faktur":         s(_text(inv, "TaxInvoiceNo") or _text(inv, "SerialNo") or _text(inv, "InvoiceNo")),
+            "masa_pajak":           get_month(raw_date),
+            "tahun_pajak":          get_year(raw_date),
+            "tanggal_faktur":       s(format_date(raw_date)),
+            "npwp":                 s(_text(inv, "BuyerTin")),
+            "nama":                 s(_text(inv, "BuyerName")),
+            "alamat_lengkap":       s(_text(inv, "BuyerAdress")),
+            "id_keterangan_tambah": s(_text(inv, "AddInfo")),
+            "referensi":            s(_text(inv, "RefDesc")),
+            "kode_dok_pendukung":   s(_text(inv, "CustomDoc")),
+            # PASSPORT hanya diisi jika jenis ID adalah paspor
+            "passport":             s(buyer_docno) if "paspor" in buyer_doc else None,
+            "id_lain":              s(buyer_docno) if buyer_doc not in ("", "npwp", "nik", "paspor") else None,
+            "kode_negara":          s(fix_country(_text(inv, "BuyerCountry"))),
+            "id_tku_penjual":       s(_text(inv, "SellerIDTKU")),
+            # Nomor faktur yang diganti (hanya ada pada pengganti)
+            "nomor_faktur_diganti": s(_text(inv, "ReplacedTaxInvoiceNo") or _text(inv, "OriginalInvoiceNo")) if fg_pengganti else None,
+            "email":                s(_text(inv, "BuyerEmail")),
+            "keterangan1":          s(_text(inv, "FacilityStamp")),
         }
+
         goods = []
         for gs in inv.iter("GoodService"):
+            harga = _float(gs, "Price")
+            qty   = _float(gs, "Qty")
+            harga_total = (harga * qty) if (harga is not None and qty is not None) else None
             goods.append({
-                "opt":         _text(gs, "Opt"),
-                "kode":        _text(gs, "Code"),
-                "nama":        _text(gs, "Name"),
-                "satuan":      _text(gs, "Unit"),
-                "harga":       _num(gs, "Price"),
-                "qty":         _num(gs, "Qty"),
-                "diskon":      _num(gs, "TotalDiscount"),
-                "dpp":         _num(gs, "TaxBase"),
-                "dpp_lain":    _num(gs, "OtherTaxBase"),
-                "tarif_ppn":   _num(gs, "VATRate"),
-                "ppn":         _num(gs, "VAT"),
-                "tarif_ppnbm": _num(gs, "STLGRate"),
-                "ppnbm":       _num(gs, "STLG"),
+                "kode_objek":     s(_text(gs, "Code")),
+                "nama":           s(_text(gs, "Name")),
+                "harga_satuan":   harga,
+                "jumlah_barang":  qty,
+                "harga_total":    harga_total,
+                "diskon":         _float(gs, "TotalDiscount"),
+                "dpp":            _float(gs, "TaxBase"),
+                "ppn":            _float(gs, "VAT"),
+                "tarif_ppnbm":    _float(gs, "STLGRate"),
+                "ppnbm":          _float(gs, "STLG"),
+                "brgjasa":        s(_text(gs, "Opt")),
+                "satuanbrgjasa":  s(_text(gs, "Unit")),
+                "dpp_nilai_lain": _float(gs, "OtherTaxBase"),
             })
+
+        # Hitung total DPP / PPN / PPnBM untuk baris FK
+        def safe_sum(key):
+            vals = [g[key] for g in goods if g[key] is not None]
+            return sum(vals) if vals else None
+
+        invoice["jumlah_dpp"]   = safe_sum("dpp")
+        invoice["jumlah_ppn"]   = safe_sum("ppn")
+        invoice["jumlah_ppnbm"] = safe_sum("ppnbm")
+
         invoices.append((invoice, goods))
+
     return invoices
 
+
 def write_xlsx_bytes(invoices, template_bytes):
+    """
+    Tulis data ke template baru.
+
+    Struktur sheet DATA:
+      Row 1 — header kolom FK  (faktur header)
+      Row 2 — header kolom LT  (detail alamat penjual, tidak dipakai)
+      Row 3 — header kolom OF  (objek faktur / barang-jasa)
+      Row 4+ — data: satu baris FK diikuti satu atau lebih baris OF per faktur
+    """
     buf = io.BytesIO(template_bytes)
     wb  = load_workbook(buf)
-    ws_faktur = wb["Faktur"]
-    ws_detail = wb["DetailFaktur"]
+    ws  = wb["DATA"]
 
-    def find_header_row(ws):
-        for r in ws.iter_rows():
-            for cell in r:
-                if cell.value == "Baris":
-                    return cell.row
-        return None
+    # Hapus data lama mulai baris 4 ke bawah
+    if ws.max_row and ws.max_row >= 4:
+        ws.delete_rows(4, ws.max_row - 3)
 
-    fhr = find_header_row(ws_faktur)
-    dhr = find_header_row(ws_detail)
+    data_row = 4
+    for inv, goods in invoices:
+        # ── Baris FK ──────────────────────────────────────────────────────
+        fk_row = [
+            "FK",                          # Col 1  – penanda tipe baris
+            inv["kd_jenis_transaksi"],     # Col 2  – KD_JENIS_TRANSAKSI
+            inv["fg_pengganti"],           # Col 3  – FG_PENGGANTI
+            inv["nomor_faktur"],           # Col 4  – NOMOR_FAKTUR
+            inv["masa_pajak"],             # Col 5  – MASA_PAJAK
+            inv["tahun_pajak"],            # Col 6  – TAHUN_PAJAK
+            inv["tanggal_faktur"],         # Col 7  – TANGGAL_FAKTUR
+            inv["npwp"],                   # Col 8  – NPWP
+            inv["nama"],                   # Col 9  – NAMA
+            inv["alamat_lengkap"],         # Col 10 – ALAMAT_LENGKAP
+            inv["jumlah_dpp"],             # Col 11 – JUMLAH_DPP
+            inv["jumlah_ppn"],             # Col 12 – JUMLAH_PPN
+            inv["jumlah_ppnbm"],           # Col 13 – JUMLAH_PPNBM
+            inv["id_keterangan_tambah"],   # Col 14 – ID_KETERANGAN_TAMBAH
+            None,                          # Col 15 – FG_UANG_MUKA       (tidak ada di XML)
+            None,                          # Col 16 – UANG_MUKA_DPP      (tidak ada di XML)
+            None,                          # Col 17 – UANG_MUKA_PPN      (tidak ada di XML)
+            None,                          # Col 18 – UANG_MUKA_PPNBM    (tidak ada di XML)
+            None,                          # Col 19 – UANG_MUKA_DPP_LAIN (tidak ada di XML)
+            inv["referensi"],              # Col 20 – REFERENSI
+            inv["kode_dok_pendukung"],     # Col 21 – KODE_DOKUMEN_PENDUKUNG
+            None,                          # Col 22 – NOMOR_FAKTUR_UANG_MUKA (tidak ada di XML)
+            inv["passport"],               # Col 23 – PASSPORT
+            inv["id_lain"],                # Col 24 – ID_LAIN
+            inv["kode_negara"],            # Col 25 – KODE_NEGARA
+            inv["id_tku_penjual"],         # Col 26 – ID_TKU_PENJUAL
+            inv["nomor_faktur_diganti"],   # Col 27 – NOMOR_FAKTUR_DIGANTI
+            inv["email"],                  # Col 28 – EMAIL
+            inv["keterangan1"],            # Col 29 – KETERANGAN1
+            None,                          # Col 30 – KETERANGAN2 (tidak ada di XML)
+            None,                          # Col 31 – KETERANGAN3 (tidak ada di XML)
+            None,                          # Col 32 – KETERANGAN4 (tidak ada di XML)
+            None,                          # Col 33 – KETERANGAN5 (tidak ada di XML)
+        ]
+        for col, val in enumerate(fk_row, 1):
+            ws.cell(row=data_row, column=col).value = val
+        data_row += 1
 
-    def clear_data_rows(ws, start):
-        rows_to_delete = []
-        for row in ws.iter_rows(min_row=start):
-            if any(c.value is not None for c in row):
-                rows_to_delete.append(row[0].row)
-        for r in reversed(rows_to_delete):
-            ws.delete_rows(r)
-
-    clear_data_rows(ws_faktur, fhr + 1)
-    clear_data_rows(ws_detail, dhr + 1)
-
-    def col_map(ws, hr):
-        return {str(c.value).strip(): c.column for c in ws[hr] if c.value}
-
-    f_cols = col_map(ws_faktur, fhr)
-    d_cols = col_map(ws_detail, dhr)
-
-    if invoices:
-        for row in ws_faktur.iter_rows(max_row=fhr - 1):
-            for cell in row:
-                if cell.value and "NPWP" in str(cell.value).upper() and "PENJUAL" in str(cell.value).upper():
-                    for c in range(cell.column + 1, cell.column + 10):
-                        t = ws_faktur.cell(row=cell.row, column=c)
-                        if type(t).__name__ == "Cell":
-                            t.value = invoices[0][0]["seller_tin"]
-                            break
-                    break
-
-    def sc(ws, row, name, val, cm):
-        col = cm.get(name)
-        if col:
-            ws.cell(row=row, column=col).value = val
-
-    f_row = fhr + 1
-    d_row = dhr + 1
-    for baris, (inv, goods) in enumerate(invoices, 1):
-        sc(ws_faktur, f_row, "Baris",                 baris,                   f_cols)
-        sc(ws_faktur, f_row, "Tanggal Faktur",        inv["date"],              f_cols)
-        sc(ws_faktur, f_row, "Jenis Faktur",          inv["jenis_faktur"],      f_cols)
-        sc(ws_faktur, f_row, "Kode Transaksi",        inv["kode_transaksi"],    f_cols)
-        sc(ws_faktur, f_row, "Keterangan Tambahan",   inv["ket_tambahan"],      f_cols)
-        sc(ws_faktur, f_row, "Dokumen Pendukung",     inv["dok_pendukung"],     f_cols)
-        sc(ws_faktur, f_row, "Referensi",             inv["referensi"],         f_cols)
-        sc(ws_faktur, f_row, "Cap Fasilitas",         inv["cap_fasilitas"],     f_cols)
-        sc(ws_faktur, f_row, "ID TKU Penjual",        inv["id_tku_penjual"],    f_cols)
-        sc(ws_faktur, f_row, "NPWP/NIK Pembeli",     inv["npwp_pembeli"],      f_cols)
-        sc(ws_faktur, f_row, "Jenis ID Pembeli",      inv["jenis_id_pembeli"],  f_cols)
-        sc(ws_faktur, f_row, "Negara Pembeli",        inv["negara_pembeli"],    f_cols)
-        sc(ws_faktur, f_row, "Nomor Dokumen Pembeli", inv["no_dok_pembeli"],    f_cols)
-        sc(ws_faktur, f_row, "Nama Pembeli",          inv["nama_pembeli"],      f_cols)
-        sc(ws_faktur, f_row, "Alamat Pembeli",        inv["alamat_pembeli"],    f_cols)
-        sc(ws_faktur, f_row, "Email Pembeli",         inv["email_pembeli"],     f_cols)
-        sc(ws_faktur, f_row, "ID TKU Pembeli",        inv["id_tku_pembeli"],    f_cols)
-        f_row += 1
+        # ── Baris OF (satu per barang/jasa) ───────────────────────────────
         for gs in goods:
-            sc(ws_detail, d_row, "Baris",              baris,             d_cols)
-            sc(ws_detail, d_row, "Barang/Jasa",        gs["opt"],         d_cols)
-            sc(ws_detail, d_row, "Kode Barang Jasa",   gs["kode"],        d_cols)
-            sc(ws_detail, d_row, "Nama Barang/Jasa",   gs["nama"],        d_cols)
-            sc(ws_detail, d_row, "Nama Satuan Ukur",   gs["satuan"],      d_cols)
-            sc(ws_detail, d_row, "Harga Satuan",       gs["harga"],       d_cols)
-            sc(ws_detail, d_row, "Jumlah Barang Jasa", gs["qty"],         d_cols)
-            sc(ws_detail, d_row, "Total Diskon",       gs["diskon"],      d_cols)
-            sc(ws_detail, d_row, "DPP",                gs["dpp"],         d_cols)
-            sc(ws_detail, d_row, "DPP Nilai Lain",     gs["dpp_lain"],    d_cols)
-            sc(ws_detail, d_row, "Tarif PPN",          gs["tarif_ppn"],   d_cols)
-            sc(ws_detail, d_row, "PPN",                gs["ppn"],         d_cols)
-            sc(ws_detail, d_row, "Tarif PPnBM",        gs["tarif_ppnbm"], d_cols)
-            sc(ws_detail, d_row, "PPnBM",              gs["ppnbm"],       d_cols)
-            d_row += 1
-
-    ws_faktur.cell(row=f_row, column=f_cols.get("Baris", 1)).value = "END"
-    ws_detail.cell(row=d_row, column=d_cols.get("Baris", 1)).value = "END"
+            of_row = [
+                "OF",                      # Col 1  – penanda tipe baris
+                gs["kode_objek"],          # Col 2  – KODE_OBJEK
+                gs["nama"],                # Col 3  – NAMA
+                gs["harga_satuan"],        # Col 4  – HARGA_SATUAN
+                gs["jumlah_barang"],       # Col 5  – JUMLAH_BARANG
+                gs["harga_total"],         # Col 6  – HARGA_TOTAL
+                gs["diskon"],              # Col 7  – DISKON
+                gs["dpp"],                 # Col 8  – DPP
+                gs["ppn"],                 # Col 9  – PPN
+                gs["tarif_ppnbm"],         # Col 10 – TARIF_PPNBM
+                gs["ppnbm"],               # Col 11 – PPNBM
+                gs["brgjasa"],             # Col 12 – BRGJASA
+                gs["satuanbrgjasa"],       # Col 13 – SATUANBRGJASA
+                gs["dpp_nilai_lain"],      # Col 14 – DPP_NILAI_LAIN
+            ]
+            for col, val in enumerate(of_row, 1):
+                ws.cell(row=data_row, column=col).value = val
+            data_row += 1
 
     out = io.BytesIO()
     wb.save(out)
@@ -268,7 +307,7 @@ HTML = """<!DOCTYPE html>
   <header>
     <div class="logo">PAJAK CONVERTER</div>
     <h1>XML <span>→</span> XLSX</h1>
-    <p class="sub-h">Konversi XML / CSV Coretax ke template XLSX PajakExpress</p>
+    <p class="sub-h">Konversi XML Coretax ke template ImporPajakKeluaran (CSV) terbaru</p>
   </header>
 
   <div id="success-banner" class="success-banner"></div>
@@ -282,7 +321,7 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="field">
-      <label>Template XLSX PajakExpress *</label>
+      <label>Template XLSX (ImporPajakKeluaran_CSV_) *</label>
       <div class="file-row">
         <input class="file-input" type="file" id="tmpl-file" accept=".xlsx">
       </div>
@@ -305,7 +344,7 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <button class="convert-btn" id="conv-btn" onclick="doConvert()">CONVERT</button>
-  <footer>Coretax DLP XML → PajakExpress XLSX &nbsp;|</footer>
+  <footer>Coretax DLP XML → ImporPajakKeluaran XLSX &nbsp;|</footer>
 </div>
 <script>
 function log(msg, err=false) {
@@ -337,7 +376,7 @@ async function doConvert() {
   const xmlFile  = document.getElementById('xml-file').files[0];
   const tmplFile = document.getElementById('tmpl-file').files[0];
   if (!xmlFile)  { alert('Pilih file XML Coretax.'); return; }
-  if (!tmplFile) { alert('Pilih file template XLSX PajakExpress.'); return; }
+  if (!tmplFile) { alert('Pilih file template XLSX ImporPajakKeluaran.'); return; }
   const btn = document.getElementById('conv-btn');
   btn.disabled = true; btn.textContent = 'SEDANG MENGONVERSI…';
   clearLog(); log('Memproses ' + xmlFile.name + '…');
@@ -380,8 +419,10 @@ def preview():
     try:
         invoices    = parse_xml_bytes(request.files["xml"].read())
         total_items = sum(len(g) for _, g in invoices)
-        preview     = [f"[{i}] {inv['nama_pembeli']} — {inv['date']} — {len(goods)} item(s)"
-                       for i, (inv, goods) in enumerate(invoices, 1)]
+        preview     = [
+            f"[{i}] {inv['nama'] or '—'} — {inv['tanggal_faktur'] or '—'} — {len(goods)} item(s)"
+            for i, (inv, goods) in enumerate(invoices, 1)
+        ]
         return jsonify(invoices=len(invoices), items=total_items, preview=preview)
     except Exception as e:
         return jsonify(error=str(e)), 400
@@ -391,8 +432,12 @@ def convert():
     try:
         invoices = parse_xml_bytes(request.files["xml"].read())
         out_buf  = write_xlsx_bytes(invoices, request.files["template"].read())
-        return send_file(out_buf, as_attachment=True, download_name="converted.xlsx",
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        return send_file(
+            out_buf,
+            as_attachment=True,
+            download_name="converted.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
     except Exception as e:
         return jsonify(error=str(e)), 400
 
