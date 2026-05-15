@@ -48,12 +48,12 @@ def _num(el, tag):
 
 
 def _round_no_decimal(v):
-    """Round to integer: fraction > .5 rounds up, fraction <= .5 rounds down.
-    e.g. 5.5 -> 5, 5.6 -> 6, 493487.5 -> 493487, 14008394.4 -> 14008394"""
+    """Round to integer: fraction >= .5 rounds up, fraction < .5 rounds down.
+    e.g. 5.5 -> 6, 5.48 -> 5, 9.55 -> 10, 493487.5 -> 493488"""
     if v is None:
         return None
     frac = v - math.floor(v)
-    return math.floor(v) if frac <= 0.5 else math.ceil(v)
+    return math.ceil(v) if frac >= 0.5 else math.floor(v)
 
 
 def to_int_or_float(v):
