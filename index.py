@@ -266,9 +266,9 @@ HTML = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <header>
-    <div class="logo">// PAJAK CONVERTER</div>
-    <h1>Coretax <span>→</span> PajakExpress</h1>
-    <p class="sub-h">Konversi XML Coretax ke template XLSX PajakExpress</p>
+    <div class="logo">PAJAK CONVERTER</div>
+    <h1>XML <span>→</span> XLSX</h1>
+    <p class="sub-h">Konversi XML / CSV Coretax ke template XLSX PajakExpress</p>
   </header>
 
   <div id="success-banner" class="success-banner"></div>
@@ -276,7 +276,7 @@ HTML = """<!DOCTYPE html>
   <div class="card">
     <div class="section-label">01 / INPUT FILES</div>
     <div class="field">
-      <label>File XML Coretax *</label>
+      <label>File XML *</label>
       <div class="file-row">
         <input class="file-input" type="file" id="xml-file" accept=".xml" onchange="onXmlChange(this)">
       </div>
@@ -304,8 +304,8 @@ HTML = """<!DOCTYPE html>
     <div class="log" id="log">Pilih file XML untuk melihat preview…</div>
   </div>
 
-  <button class="convert-btn" id="conv-btn" onclick="doConvert()">KONVERSI SEKARANG</button>
-  <footer>Coretax DLP XML → PajakExpress XLSX &nbsp;|&nbsp; Powered by Flask + openpyxl</footer>
+  <button class="convert-btn" id="conv-btn" onclick="doConvert()">CONVERT</button>
+  <footer>Coretax DLP XML → PajakExpress XLSX &nbsp;|</footer>
 </div>
 <script>
 function log(msg, err=false) {
