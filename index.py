@@ -129,17 +129,21 @@ def parse_xml_bytes(xml_bytes):
 
         goods = []
         for gs in inv.iter("GoodService"):
-            price = _num(gs, "Price")
-            qty   = _num(gs, "Qty")
+            price    = _num(gs, "Price")
+            qty      = _num(gs, "Qty")
+            tax_base = _num(gs, "TaxBase")
+            discount = _num(gs, "TotalDiscount")
             harga_total = (price * qty) if (price is not None and qty is not None) else None
+            # DPP = TaxBase - TotalDiscount
+            dpp_val = ((tax_base or 0) - (discount or 0)) if tax_base is not None else None
             goods.append({
                 "kode_objek":     _text(gs, "Code"),
                 "nama":           _text(gs, "Name"),
                 "harga_satuan":   to_int_or_float(price),
                 "jumlah_barang":  to_int_or_float(qty),
                 "harga_total":    to_int_or_float(harga_total),
-                "diskon":         to_int_or_float(_num(gs, "TotalDiscount")),
-                "dpp":            to_int_or_float(_num(gs, "TaxBase")),
+                "diskon":         to_int_or_float(discount),
+                "dpp":            to_int_or_float(dpp_val),
                 "ppn":            to_int_or_float(_num(gs, "VAT")),
                 "tarif_ppnbm":    fmt_str(_num(gs, "STLGRate")),
                 "ppnbm":          fmt_str(_num(gs, "STLG")),
