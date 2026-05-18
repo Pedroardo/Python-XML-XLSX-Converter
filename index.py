@@ -6,6 +6,7 @@ Untuk local dev: python index.py
 
 from flask import Flask, request, send_file, jsonify, Response
 import io, csv, math
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from openpyxl import load_workbook
@@ -48,12 +49,16 @@ def _num(el, tag):
 
 
 def _round_no_decimal(v):
-    """Round to integer: fraction >= .5 rounds up, fraction < .5 rounds down.
-    e.g. 5.5 -> 6, 5.48 -> 5, 9.55 -> 10, 493487.5 -> 493488"""
+    """Round to integer using exact decimal arithmetic to avoid float precision bugs.
+    >= .5 rounds up, < .5 rounds down. e.g. 5.5->6, 5.48->5, 12345.00->12345, 12345.30->12345"""
     if v is None:
         return None
-    frac = v - math.floor(v)
-    return math.ceil(v) if frac >= 0.5 else math.floor(v)
+    try:
+        # Convert via string to avoid float representation errors like 12345.00 -> 12344.9999...
+        d = Decimal(str(v)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return int(d)
+    except InvalidOperation:
+        return int(math.floor(v))
 
 
 def to_int_or_float(v):
@@ -165,8 +170,9 @@ def parse_xml_bytes(xml_bytes):
             vals = [g[key] for g in goods if g[key] is not None]
             if not vals:
                 return None
-            s = sum(float(v) for v in vals)
-            return str(_round_no_decimal(s))
+            # Use Decimal to avoid floating point accumulation errors
+            s = sum(Decimal(str(v)) for v in vals)
+            return str(int(s.quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
 
         invoice["jumlah_dpp"]   = total_str("dpp")
         invoice["jumlah_ppn"]   = total_str("ppn")
