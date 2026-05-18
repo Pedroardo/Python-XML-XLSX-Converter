@@ -39,26 +39,42 @@ def _text(el, tag):
 
 
 def _num(el, tag):
+    """Parse XML text to Decimal (exact). Returns None if missing/invalid."""
     raw = _text(el, tag)
     if raw is None:
         return None
+    cleaned = raw.strip().replace(",", ".")
     try:
-        return float(raw)
-    except ValueError:
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return None
+
+
+def _to_decimal(v):
+    """Safely coerce any value (float, int, str, Decimal) to Decimal. Returns None on failure."""
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return v
+    try:
+        return Decimal(str(v))
+    except InvalidOperation:
         return None
 
 
 def _round_no_decimal(v):
-    """Round to integer using exact decimal arithmetic to avoid float precision bugs.
-    >= .5 rounds up, < .5 rounds down. e.g. 5.5->6, 5.48->5, 12345.00->12345, 12345.30->12345"""
-    if v is None:
+    """Round with rule: fraction > .50 rounds up, fraction <= .50 stays (rounds down).
+    Uses exact Decimal — no float precision errors ever.
+    123123.52->123124  123123.50->123123  123123.30->123123  123123.00->123123"""
+    d = _to_decimal(v)
+    if d is None:
         return None
-    try:
-        # Convert via string to avoid float representation errors like 12345.00 -> 12344.9999...
-        d = Decimal(str(v)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        return int(d)
-    except InvalidOperation:
-        return int(math.floor(v))
+    floor_d = d.to_integral_value(rounding="ROUND_FLOOR")
+    frac = d - floor_d
+    if frac >= Decimal("0.50"):
+        return int(floor_d) + 1
+    else:
+        return int(floor_d)
 
 
 def to_int_or_float(v):
@@ -170,9 +186,8 @@ def parse_xml_bytes(xml_bytes):
             vals = [g[key] for g in goods if g[key] is not None]
             if not vals:
                 return None
-            # Use Decimal to avoid floating point accumulation errors
-            s = sum(Decimal(str(v)) for v in vals)
-            return str(int(s.quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+            # All vals are already int (post-rounding); sum exactly
+            return str(sum(int(v) for v in vals))
 
         invoice["jumlah_dpp"]   = total_str("dpp")
         invoice["jumlah_ppn"]   = total_str("ppn")
