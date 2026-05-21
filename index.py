@@ -5,7 +5,7 @@ Untuk local dev: python index.py
 """
 
 from flask import Flask, request, send_file, jsonify, Response
-import io, csv, math
+import io, csv, math, random
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime
 from xml.etree import ElementTree as ET
@@ -63,9 +63,6 @@ def _to_decimal(v):
 
 
 def _round_no_decimal(v):
-    """Round with rule: fraction > .50 rounds up, fraction <= .50 stays (rounds down).
-    Uses exact Decimal — no float precision errors ever.
-    123123.52->123124  123123.50->123123  123123.30->123123  123123.00->123123"""
     d = _to_decimal(v)
     if d is None:
         return None
@@ -164,7 +161,6 @@ def parse_xml_bytes(xml_bytes):
             tax_base = _num(gs, "TaxBase")
             discount = _num(gs, "TotalDiscount")
             harga_total = (price * qty) if (price is not None and qty is not None) else None
-            # DPP = TaxBase - TotalDiscount
             dpp_val = ((tax_base or 0) - (discount or 0)) if tax_base is not None else None
             goods.append({
                 "kode_objek":     _text(gs, "Code"),
@@ -186,7 +182,6 @@ def parse_xml_bytes(xml_bytes):
             vals = [g[key] for g in goods if g[key] is not None]
             if not vals:
                 return None
-            # All vals are already int (post-rounding); sum exactly
             return str(sum(int(v) for v in vals))
 
         invoice["jumlah_dpp"]   = total_str("dpp")
@@ -198,26 +193,27 @@ def parse_xml_bytes(xml_bytes):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NOMOR_FAKTUR Generator
+# NOMOR_FAKTUR Generator — random 5-digit, unique per session
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_nomor(inv, seq, prefix, start):
-    num = str(start + seq).zfill(5)
-    if prefix:
-        return f"{prefix}{num}"
-    tahun = inv.get("tahun_pajak") or ""
-    masa  = str(inv.get("masa_pajak") or "").zfill(2)
-    return f"{tahun}{masa}{num}"
+def gen_nomor_random(used_set):
+    """Generate a unique random 5-digit NO_FAKTUR (10000–99999)."""
+    while True:
+        num = random.randint(10000, 99999)
+        if num not in used_set:
+            used_set.add(num)
+            return str(num)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Row Builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_data_rows(invoices, prefix, start):
+def build_data_rows(invoices):
     rows = []
-    for seq, (inv, goods) in enumerate(invoices):
-        nomor = gen_nomor(inv, seq, prefix, start)
+    used = set()
+    for inv, goods in invoices:
+        nomor = gen_nomor_random(used)
         fk = [
             "FK",
             inv["kd_jenis_transaksi"],
@@ -233,10 +229,10 @@ def build_data_rows(invoices, prefix, start):
             inv["jumlah_ppn"],
             inv["jumlah_ppnbm"],
             inv["id_keterangan_tambah"],
-            None, None, None, None, None,   # uang muka (tidak ada di XML)
+            None, None, None, None, None,
             inv["referensi"],
             inv["kode_dok_pendukung"],
-            None,                            # nomor_faktur_uang_muka
+            None,
             inv["passport"],
             inv["id_lain"],
             inv["kode_negara"],
@@ -244,7 +240,7 @@ def build_data_rows(invoices, prefix, start):
             inv["nomor_faktur_diganti"],
             inv["email"],
             inv["keterangan1"],
-            None, None, None, None,          # keterangan 2-5
+            None, None, None, None,
         ]
         rows.append(fk)
 
@@ -274,12 +270,12 @@ def build_data_rows(invoices, prefix, start):
 # Writers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def write_xlsx(invoices, template_bytes, prefix, start):
+def write_xlsx(invoices, template_bytes):
     wb = load_workbook(io.BytesIO(template_bytes))
     ws = wb["DATA"]
     if ws.max_row and ws.max_row >= 4:
         ws.delete_rows(4, ws.max_row - 3)
-    for row in build_data_rows(invoices, prefix, start):
+    for row in build_data_rows(invoices):
         ws.append(row)
     out = io.BytesIO()
     wb.save(out)
@@ -305,20 +301,19 @@ _H_OF = (["OF","KODE_OBJEK","NAMA","HARGA_SATUAN","JUMLAH_BARANG","HARGA_TOTAL",
            "DPP_NILAI_LAIN"] + [""] * 19)
 
 
-def write_csv(invoices, prefix, start):
+def write_csv(invoices):
     buf = io.StringIO()
     w   = csv.writer(buf, lineterminator="\r\n")
     w.writerow(_H_FK)
     w.writerow(_H_LT)
     w.writerow(_H_OF)
-    for row in build_data_rows(invoices, prefix, start):
+    for row in build_data_rows(invoices):
         w.writerow(["" if v is None else v for v in row])
     return io.BytesIO(buf.getvalue().encode("utf-8-sig"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTML  — NOTE: pakai Response() bukan render_template_string()
-#         supaya Jinja2 tidak memproses CSS/JS braces
+# HTML — friendly, warm, bright design
 # ─────────────────────────────────────────────────────────────────────────────
 
 HTML = r"""<!DOCTYPE html>
@@ -326,172 +321,380 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coretax &rarr; PajakExpress</title>
+<title>Coretax → PajakExpress Converter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 :root {
-  --bg:#080b10; --card:#0e1318; --border:#1e2830;
-  --accent:#00d4ff; --green:#00ff9d; --yellow:#ffd166;
-  --text:#c8d8e8; --sub:#4a6070; --danger:#ff4d6d;
+  --bg: #f0f4ff;
+  --card: #ffffff;
+  --border: #dde4f5;
+  --accent: #4f6ef7;
+  --accent2: #7c3aed;
+  --green: #10b981;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+  --text: #1e293b;
+  --sub: #64748b;
+  --muted: #94a3b8;
+  --shadow: 0 4px 24px rgba(79,110,247,.10);
+  --shadow-hover: 0 8px 32px rgba(79,110,247,.18);
 }
 * { box-sizing:border-box; margin:0; padding:0; }
 body {
-  background:var(--bg); color:var(--text);
-  font-family:'IBM Plex Sans',sans-serif;
-  min-height:100vh; display:flex; flex-direction:column;
-  align-items:center; padding:40px 16px 60px;
-}
-body::before {
-  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background: var(--bg);
   background-image:
-    linear-gradient(rgba(0,212,255,.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,212,255,.04) 1px, transparent 1px);
-  background-size:40px 40px;
+    radial-gradient(circle at 15% 15%, rgba(124,58,237,.10) 0%, transparent 50%),
+    radial-gradient(circle at 85% 80%, rgba(79,110,247,.10) 0%, transparent 50%);
+  color: var(--text);
+  font-family: 'Nunito', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 16px 80px;
 }
-.wrap { position:relative; z-index:1; width:100%; max-width:600px; }
-header { text-align:center; margin-bottom:32px; }
-.logo { font-size:11px; color:var(--accent); letter-spacing:4px;
-        font-family:'IBM Plex Mono',monospace; margin-bottom:10px; }
-h1 { font-size:24px; font-weight:600; color:#fff; }
-h1 span { color:var(--accent); }
-.sub-h { font-size:12px; color:var(--sub); margin-top:5px; }
-.card { background:var(--card); border:1px solid var(--border);
-        border-radius:6px; padding:20px; margin-bottom:12px; }
-.slabel { font-family:'IBM Plex Mono',monospace; font-size:10px;
-          color:var(--sub); letter-spacing:2px; margin-bottom:14px; }
-.field + .field { margin-top:12px; }
-label { display:block; font-size:11px; color:var(--sub); margin-bottom:5px; }
-.file-input, .text-input {
-  width:100%; background:#050709; border:1px solid var(--border); border-radius:4px;
-  color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:11px;
-  padding:9px 12px; outline:none; cursor:pointer; transition:border-color .2s;
+
+.wrap { width: 100%; max-width: 620px; }
+
+/* ── Header ── */
+header { text-align: center; margin-bottom: 36px; }
+.badge {
+  display: inline-block;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  padding: 4px 14px;
+  border-radius: 99px;
+  margin-bottom: 14px;
+  text-transform: uppercase;
 }
-.file-input:hover, .text-input:hover, .text-input:focus { border-color:var(--accent); }
-.row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-.hint { font-size:11px; color:var(--sub); margin-top:6px; line-height:1.5; }
-.hint code { color:var(--accent); }
-.fmt-toggle { display:flex; gap:8px; }
+h1 {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.1;
+}
+h1 .arrow {
+  display: inline-block;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  padding: 0 6px;
+}
+.sub-h {
+  font-size: 14px;
+  color: var(--sub);
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+/* ── Cards ── */
+.card {
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+  transition: box-shadow .2s;
+}
+.card:hover { box-shadow: var(--shadow-hover); }
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 16px;
+}
+.section-label .num {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 800;
+}
+
+/* ── Fields ── */
+.field + .field { margin-top: 14px; }
+label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+label .opt { font-weight: 400; color: var(--muted); font-size: 12px; }
+
+.file-zone {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all .2s;
+  position: relative;
+  background: #fafbff;
+}
+.file-zone:hover, .file-zone.has-file {
+  border-color: var(--accent);
+  background: rgba(79,110,247,.04);
+}
+.file-zone input[type=file] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%;
+}
+.file-zone .icon { font-size: 28px; margin-bottom: 6px; }
+.file-zone .fz-label { font-size: 13px; font-weight: 700; color: var(--sub); }
+.file-zone .fz-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.file-zone.has-file .fz-label { color: var(--accent); }
+
+/* ── Info box ── */
+.info-box {
+  background: linear-gradient(135deg, rgba(79,110,247,.07), rgba(124,58,237,.07));
+  border: 1.5px solid rgba(79,110,247,.2);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 13px;
+  color: var(--sub);
+  line-height: 1.6;
+  font-weight: 600;
+}
+.info-box .tag {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  margin-left: 4px;
+}
+
+/* ── Format toggle ── */
+.fmt-toggle { display: flex; gap: 10px; }
 .fmt-btn {
-  flex:1; background:#050709; border:1px solid var(--border); border-radius:4px;
-  color:var(--sub); font-family:'IBM Plex Mono',monospace; font-size:12px;
-  padding:10px; cursor:pointer; transition:all .2s; text-align:center;
-  letter-spacing:1px; user-select:none;
+  flex: 1;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 10px;
+  cursor: pointer;
+  transition: all .2s;
+  text-align: center;
+  background: #fafbff;
+  font-family: 'Nunito', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--sub);
+  user-select: none;
 }
-.fmt-btn.active { border-color:var(--accent); color:var(--accent); background:rgba(0,212,255,.06); }
-.stats { display:flex; gap:10px; margin-bottom:12px; }
+.fmt-btn .fmt-icon { font-size: 22px; display: block; margin-bottom: 4px; }
+.fmt-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(79,110,247,.04); }
+.fmt-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(79,110,247,.08);
+  box-shadow: 0 0 0 3px rgba(79,110,247,.15);
+}
+
+/* ── Stats ── */
+.stats { display: flex; gap: 10px; margin-bottom: 14px; }
 .stat {
-  flex:1; background:#050709; border:1px solid var(--border);
-  border-radius:4px; padding:12px; text-align:center;
+  flex: 1;
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  background: linear-gradient(135deg, #f0f4ff, #e8edff);
+  border: 1.5px solid var(--border);
 }
-.stat-num { font-size:26px; font-weight:600; color:var(--accent);
-            font-family:'IBM Plex Mono',monospace; }
-.stat-num.g { color:var(--green); }
-.stat-lbl { font-size:10px; color:var(--sub); margin-top:2px; }
+.stat-num {
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1;
+}
+.stat-num.g { color: var(--green); }
+.stat-lbl { font-size: 11px; font-weight: 700; color: var(--sub); margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+/* ── Log ── */
 .log {
-  background:#020304; border:1px solid var(--border); border-radius:4px;
-  font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--green);
-  padding:12px; height:130px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;
+  background: #0f172a;
+  border-radius: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 14px;
+  height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.6;
 }
-.log .err  { color:var(--danger); }
-.log .warn { color:var(--yellow); }
+.log .ok   { color: #34d399; }
+.log .err  { color: #f87171; }
+.log .warn { color: #fbbf24; }
+
+/* ── Button ── */
 .btn {
-  width:100%; background:var(--accent); color:#000; border:none; border-radius:4px;
-  font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:600;
-  letter-spacing:2px; padding:15px; cursor:pointer; transition:opacity .2s, transform .1s;
+  width: 100%;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  border: none;
+  border-radius: 14px;
+  font-family: 'Nunito', sans-serif;
+  font-size: 16px;
+  font-weight: 800;
+  padding: 18px;
+  cursor: pointer;
+  transition: all .2s;
+  box-shadow: 0 6px 20px rgba(79,110,247,.35);
+  letter-spacing: .5px;
+  margin-top: 4px;
 }
-.btn:hover  { opacity:.88; }
-.btn:active { transform:scale(.99); }
-.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(79,110,247,.45); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* ── Banner ── */
 .banner {
-  display:none; background:rgba(0,255,157,.08); border:1px solid var(--green);
-  border-radius:4px; padding:13px; color:var(--green); font-size:13px;
-  margin-bottom:12px; text-align:center;
+  display: none;
+  background: linear-gradient(135deg, rgba(16,185,129,.1), rgba(16,185,129,.05));
+  border: 1.5px solid rgba(16,185,129,.4);
+  border-radius: 12px;
+  padding: 14px 18px;
+  color: var(--green);
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 16px;
+  text-align: center;
 }
-footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
+
+/* ── Footer ── */
+footer {
+  margin-top: 40px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  font-weight: 600;
+}
 </style>
 </head>
 <body>
 <div class="wrap">
 
   <header>
-    <div class="logo">PAJAK CONVERTER</div>
-    <h1>XML <span>&rarr;</span> PajakExpress</h1>
-    <p class="sub-h">Coretax DLP XML &rarr; ImporPajakKeluaran XLSX / CSV</p>
+    <div class="badge">✦ Pajak Converter ✦</div>
+    <h1>XML <span class="arrow">→</span> PajakExpress</h1>
+    <p class="sub-h">Konversi Coretax DLP XML ke format ImporPajakKeluaran XLSX / CSV</p>
   </header>
 
   <div id="banner" class="banner"></div>
 
   <!-- 01 FILES -->
   <div class="card">
-    <div class="slabel">01 / INPUT FILES</div>
+    <div class="section-label"><span class="num">1</span> Upload File</div>
+
     <div class="field">
-      <label>File XML Coretax *</label>
-      <input class="file-input" type="file" id="xml-file" accept=".xml">
+      <label>File XML Coretax <span style="color:var(--red)">*</span></label>
+      <div class="file-zone" id="xml-zone">
+        <input type="file" id="xml-file" accept=".xml">
+        <div class="icon">📄</div>
+        <div class="fz-label" id="xml-label">Klik atau drag file XML ke sini</div>
+        <div class="fz-sub">Format: .xml dari Coretax DLP</div>
+      </div>
     </div>
+
     <div class="field" id="tmpl-wrap">
-      <label>Template XLSX (ImporPajakKeluaran_CSV_) &mdash; wajib untuk output XLSX</label>
-      <input class="file-input" type="file" id="tmpl-file" accept=".xlsx">
+      <label>Template XLSX <span class="opt">(wajib untuk output XLSX)</span></label>
+      <div class="file-zone" id="tmpl-zone">
+        <input type="file" id="tmpl-file" accept=".xlsx">
+        <div class="icon">📊</div>
+        <div class="fz-label" id="tmpl-label">Klik atau drag template XLSX ke sini</div>
+        <div class="fz-sub">ImporPajakKeluaran_CSV_.xlsx</div>
+      </div>
     </div>
   </div>
 
-  <!-- 02 NOMOR FAKTUR -->
+  <!-- 02 NO FAKTUR INFO -->
   <div class="card">
-    <div class="slabel">02 / NOMOR FAKTUR <span style="color:var(--danger)">*</span></div>
-    <p class="hint" style="margin-bottom:12px;">
-      NOMOR_FAKTUR tidak ada di XML Coretax &mdash; akan di-generate otomatis.<br>
-      Default: <code>YYYYMM</code> + 5 digit urutan &nbsp;&rarr;&nbsp;
-      <code id="nomor-ex">20260400001</code>
-    </p>
-    <div class="row2">
-      <div class="field">
-        <label>Prefix kustom (opsional)</label>
-        <input class="text-input" type="text" id="prefix" placeholder="cth: INV atau kosongkan">
-      </div>
-      <div class="field">
-        <label>Nomor urut awal</label>
-        <input class="text-input" type="number" id="start-num" value="1" min="1">
-      </div>
+    <div class="section-label"><span class="num">2</span> Nomor Faktur</div>
+    <div class="info-box">
+      🎲 <strong>Auto-generate otomatis</strong> — NO_FAKTUR tidak tersedia di XML Coretax,
+      sehingga sistem akan membuat <strong>nomor acak 5 digit unik</strong>
+      <span class="tag">10000–99999</span> untuk setiap faktur secara otomatis.
+      Tidak perlu pengaturan tambahan!
     </div>
   </div>
 
   <!-- 03 FORMAT -->
   <div class="card">
-    <div class="slabel">03 / FORMAT OUTPUT</div>
+    <div class="section-label"><span class="num">3</span> Format Output</div>
     <div class="fmt-toggle">
-      <div class="fmt-btn active" id="btn-xlsx">&#128202;&nbsp; XLSX</div>
-      <div class="fmt-btn"        id="btn-csv"> &#128196;&nbsp; CSV</div>
+      <div class="fmt-btn active" id="btn-xlsx">
+        <span class="fmt-icon">📊</span>
+        XLSX
+      </div>
+      <div class="fmt-btn" id="btn-csv">
+        <span class="fmt-icon">📋</span>
+        CSV
+      </div>
     </div>
-    <p class="hint" style="margin-top:10px;" id="fmt-hint">
+    <p style="font-size:12px; color:var(--sub); margin-top:12px; font-weight:600;" id="fmt-hint">
       XLSX: mengisi template ImporPajakKeluaran (perlu upload template di atas).
     </p>
   </div>
 
   <!-- 04 PREVIEW -->
   <div class="card">
-    <div class="slabel">04 / PREVIEW</div>
+    <div class="section-label"><span class="num">4</span> Preview</div>
     <div class="stats">
       <div class="stat">
-        <div class="stat-num"   id="inv-count">&#8212;</div>
+        <div class="stat-num" id="inv-count">—</div>
         <div class="stat-lbl">Faktur (FK)</div>
       </div>
       <div class="stat">
-        <div class="stat-num g" id="item-count">&#8212;</div>
+        <div class="stat-num g" id="item-count">—</div>
         <div class="stat-lbl">Item (OF)</div>
       </div>
     </div>
-    <div class="log" id="log">Pilih file XML untuk melihat preview&hellip;</div>
+    <div class="log" id="log">Pilih file XML untuk melihat preview…</div>
   </div>
 
-  <button class="btn" id="conv-btn">&#9654;&nbsp; CONVERT &amp; DOWNLOAD</button>
-  <footer>Coretax DLP XML &rarr; ImporPajakKeluaran &nbsp;|&nbsp; XLSX &amp; CSV</footer>
+  <button class="btn" id="conv-btn">▶ &nbsp;Convert &amp; Download</button>
+
+  <footer>Coretax DLP XML → ImporPajakKeluaran &nbsp;·&nbsp; XLSX &amp; CSV</footer>
 </div>
 
 <script>
 (function () {
-  /* ── state ── */
   var outputFmt = 'xlsx';
 
-  /* ── format toggle ── */
+  /* ── File zone labels ── */
+  function setupFileZone(inputId, zoneId, labelId) {
+    var input = document.getElementById(inputId);
+    var zone  = document.getElementById(zoneId);
+    var lbl   = document.getElementById(labelId);
+    input.addEventListener('change', function () {
+      if (this.files.length) {
+        lbl.textContent = this.files[0].name;
+        zone.classList.add('has-file');
+      }
+    });
+  }
+  setupFileZone('xml-file',  'xml-zone',  'xml-label');
+  setupFileZone('tmpl-file', 'tmpl-zone', 'tmpl-label');
+
+  /* ── Format toggle ── */
   document.getElementById('btn-xlsx').addEventListener('click', function () { setFmt('xlsx'); });
   document.getElementById('btn-csv').addEventListener('click',  function () { setFmt('csv');  });
 
@@ -505,19 +708,7 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
       : 'CSV: UTF-8 BOM, flat file, langsung bisa diupload ke PajakExpress.';
   }
 
-  /* ── nomor preview ── */
-  function updateNomorPreview() {
-    var prefix = document.getElementById('prefix').value.trim();
-    var start  = parseInt(document.getElementById('start-num').value, 10) || 1;
-    var num    = String(start).padStart(5, '0');
-    var sample = prefix ? (prefix + num) : ('YYYYMM' + num);
-    document.getElementById('nomor-ex').textContent = sample;
-  }
-  document.getElementById('prefix').addEventListener('input',  updateNomorPreview);
-  document.getElementById('start-num').addEventListener('input', updateNomorPreview);
-  updateNomorPreview();
-
-  /* ── log helpers ── */
+  /* ── Log helpers ── */
   function addLog(msg, cls) {
     var el   = document.getElementById('log');
     var span = document.createElement('span');
@@ -528,13 +719,13 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
   }
   function clearLog() { document.getElementById('log').innerHTML = ''; }
 
-  /* ── XML preview (on file select) ── */
+  /* ── XML preview ── */
   document.getElementById('xml-file').addEventListener('change', function () {
     if (!this.files.length) return;
     var fd = new FormData();
     fd.append('xml', this.files[0]);
     clearLog();
-    addLog('Membaca XML\u2026');
+    addLog('Membaca XML…');
 
     fetch('/api/preview', { method: 'POST', body: fd })
       .then(function (res) { return res.json(); })
@@ -542,18 +733,16 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
         if (data.error) { addLog('ERROR: ' + data.error, 'err'); return; }
         document.getElementById('inv-count').textContent  = data.invoices;
         document.getElementById('item-count').textContent = data.items;
-        (data.warnings || []).forEach(function (w) { addLog('\u26a0 ' + w, 'warn'); });
-        data.preview.forEach(function (p) { addLog(p); });
+        (data.warnings || []).forEach(function (w) { addLog('⚠ ' + w, 'warn'); });
+        data.preview.forEach(function (p) { addLog(p, 'ok'); });
       })
       .catch(function (e) { addLog('Gagal: ' + e, 'err'); });
   });
 
-  /* ── convert ── */
+  /* ── Convert ── */
   document.getElementById('conv-btn').addEventListener('click', function () {
     var xmlFile  = document.getElementById('xml-file').files[0];
     var tmplFile = document.getElementById('tmpl-file').files[0];
-    var prefix   = document.getElementById('prefix').value.trim();
-    var startNum = parseInt(document.getElementById('start-num').value, 10) || 1;
 
     if (!xmlFile) { alert('Pilih file XML Coretax terlebih dahulu.'); return; }
     if (outputFmt === 'xlsx' && !tmplFile) {
@@ -563,15 +752,13 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
 
     var btn = document.getElementById('conv-btn');
     btn.disabled    = true;
-    btn.textContent = 'SEDANG MENGONVERSI\u2026';
+    btn.textContent = '⏳  Sedang Mengonversi…';
     clearLog();
-    addLog('Memproses ' + xmlFile.name + '\u2026');
+    addLog('Memproses ' + xmlFile.name + '…');
 
     var fd = new FormData();
-    fd.append('xml',       xmlFile);
-    fd.append('format',    outputFmt);
-    fd.append('prefix',    prefix);
-    fd.append('start_num', startNum);
+    fd.append('xml',    xmlFile);
+    fd.append('format', outputFmt);
     if (tmplFile) fd.append('template', tmplFile);
 
     fetch('/api/convert', { method: 'POST', body: fd })
@@ -584,22 +771,19 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
         return res.blob();
       })
       .then(function (blob) {
-        /* ── FIX: append anchor to DOM sebelum click, revoke setelah delay ── */
         var ext  = (outputFmt === 'csv') ? '.csv' : '.xlsx';
         var name = xmlFile.name.replace(/\.xml$/i, '') + '_converted' + ext;
         var url  = URL.createObjectURL(blob);
         var a    = document.createElement('a');
-        a.href        = url;
-        a.download    = name;
-        a.style.display = 'none';
+        a.href = url; a.download = name; a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         setTimeout(function () { URL.revokeObjectURL(url); }, 500);
 
-        addLog('\u2713 Selesai \u2014 ' + name + ' sudah diunduh.');
+        addLog('✓ Selesai — ' + name + ' sudah diunduh!', 'ok');
         var banner = document.getElementById('banner');
-        banner.textContent = '\u2713 Konversi berhasil! File: ' + name;
+        banner.innerHTML = '🎉 Konversi berhasil! File <strong>' + name + '</strong> sudah diunduh.';
         banner.style.display = 'block';
       })
       .catch(function (e) {
@@ -607,7 +791,7 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
       })
       .finally(function () {
         btn.disabled    = false;
-        btn.textContent = '\u25b6  CONVERT & DOWNLOAD';
+        btn.textContent = '▶  Convert & Download';
       });
   });
 
@@ -623,8 +807,6 @@ footer { margin-top:36px; font-size:11px; color:var(--sub); text-align:center; }
 
 @app.route("/")
 def index():
-    # Gunakan Response() langsung — BUKAN render_template_string()
-    # agar Jinja2 tidak memproses CSS/JS curly braces
     return Response(HTML, mimetype="text/html")
 
 
@@ -659,18 +841,16 @@ def convert():
     try:
         invoices = parse_xml_bytes(request.files["xml"].read())
         fmt      = request.form.get("format", "xlsx").lower()
-        prefix   = request.form.get("prefix", "").strip()
-        start    = int(request.form.get("start_num", 1) or 1)
 
         if fmt == "csv":
-            buf     = write_csv(invoices, prefix, start)
+            buf     = write_csv(invoices)
             mime    = "text/csv"
             dl_name = "converted.csv"
         else:
             tmpl = request.files.get("template")
             if not tmpl:
                 return jsonify(error="Template XLSX wajib disertakan untuk output XLSX."), 400
-            buf     = write_xlsx(invoices, tmpl.read(), prefix, start)
+            buf     = write_xlsx(invoices, tmpl.read())
             mime    = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             dl_name = "converted.xlsx"
 
@@ -679,12 +859,6 @@ def convert():
     except Exception as e:
         return jsonify(error=str(e)), 400
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Local development entry point
-# Vercel memanggil `app` langsung tanpa blok ini.
-# Jalankan lokal dengan: python index.py
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
