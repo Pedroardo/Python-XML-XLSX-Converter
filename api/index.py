@@ -661,10 +661,6 @@ footer {
     <div class="info-box">
       🎲 <strong>Auto-generate otomatis</strong> — NO_FAKTUR tidak tersedia di XML Coretax,
       sehingga sistem akan membuat <strong>nomor unik 9 digit</strong>
-      <span class="tag">100000000–999999999</span> untuk setiap faktur secara otomatis,
-      dibuat dari kombinasi waktu presisi-nano dan angka acak aman sehingga praktis
-      tidak akan pernah bentrok walau dipakai setiap hari selama bertahun-tahun.
-      Tidak perlu pengaturan tambahan!
     </div>
   </div>
 
